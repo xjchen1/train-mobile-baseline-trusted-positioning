@@ -1,0 +1,454 @@
+--- a/app/consapp/rnx2rtkp/rnx2rtkp.c
++++ b/app/consapp/rnx2rtkp/rnx2rtkp.c
+@@ -19,6 +19,7 @@
+ *-----------------------------------------------------------------------------*/
+ #include <stdarg.h>
+ #include "rtklib.h"
++#include "relmotion.h"
+ 
+ #define PROGNAME    "rnx2rtkp"          /* program name */
+ #define MAXFILE     16                  /* max number of input files */
+@@ -184,6 +185,7 @@
+         showmsg("error : no input file");
+         return -2;
+     }
++    {char why[256];if(relcv_options(&prcopt,why,sizeof(why))||(prcopt.relmotion&&solopt.outvel)){fprintf(stderr,"invalid relative config: %s\n",solopt.outvel?"standard absolute velocity output must be off":why);return -3;}}
+     ret=postpos(ts,te,tint,0.0,&prcopt,&solopt,&filopt,infile,n,outfile,"","");
+     
+     if (!ret) fprintf(stderr,"%40s\r","");
+--- a/src/options.c
++++ b/src/options.c
+@@ -74,6 +74,9 @@
+     {"pos1-snrmask_L2", 2,  (void *)snrmask_[1],         ""     },
+     {"pos1-snrmask_L5", 2,  (void *)snrmask_[2],         ""     },
+     {"pos1-dynamics",   3,  (void *)&prcopt_.dynamics,   SWTOPT },
++    {"pos1-relmotion",  3,  (void *)&prcopt_.relmotion,  "0:off,1:cv"},
++    {"stats-relq",      1,  (void *)&prcopt_.relq,       "m2/s3"},
++    {"stats-relv0",     1,  (void *)&prcopt_.relv0,      "m/s"},
+     {"pos1-tidecorr",   3,  (void *)&prcopt_.tidecorr,   TIDEOPT},
+     {"pos1-ionoopt",    3,  (void *)&prcopt_.ionoopt,    IONOPT },
+     {"pos1-tropopt",    3,  (void *)&prcopt_.tropopt,    TRPOPT },
+--- a/src/postpos.c
++++ b/src/postpos.c
+@@ -45,6 +45,7 @@
+ *                            writing solution file in binary mode
+ *-----------------------------------------------------------------------------*/
+ #include "rtklib.h"
++#include "research_audit.h"
+ 
+ #define MIN(x,y)    ((x)<(y)?(x):(y))
+ #define SQRT(x)     ((x)<=0.0||(x)!=(x)?0.0:sqrt(x))
+@@ -356,7 +357,10 @@
+         if (!strstr(popt->pppopt,"-ENA_FCB")) {
+             corr_phase_bias_ssr(obs,n,&navs);
+         }
+-        if (!rtkpos(&rtk,obs,n,&navs)) continue;
++        { double tic=research_clock(); int rc=rtkpos(&rtk,obs,n,&navs);
++          research_epoch(&rtk,obs[0].time,rc,research_clock()-tic);
++          if(rtk.opt.relmotion&&rtk.rel_error){aborts=1;break;}
++          if (!rc) continue; }
+         
+         if (mode==0) { /* forward/backward */
+             if (!solstatic) {
+--- /dev/null
++++ b/src/relmotion.c
+@@ -0,0 +1,69 @@
++/* Conditional relative CV in native ECEF position coordinates.
++ * x[0:3] = current base SPP anchor + baseline; x[3:6] = relative velocity.
++ * Preserve the native phase-bias representation and native measurement kernel. */
++#include "relmotion.h"
++int relcv_options(const prcopt_t*o,char*msg,size_t n){
++ if(!o->relmotion)return 0;
++ if(o->relmotion!=1||o->mode!=PMODE_MOVEB||o->dynamics||o->soltype||o->nf!=2||o->navsys!=SYS_GPS||o->sateph!=EPHOPT_BRDC||o->ionoopt!=IONOOPT_BRDC||o->tropopt!=TROPOPT_SAAS||o->intpref||o->baseline[0]!=0.||o->baseline[1]!=0.||!isfinite(o->relq)||o->relq<0.||!isfinite(o->relv0)||o->relv0<=0.){
++  snprintf(msg,n,"relative CV requires forward GPS L1/L2 movingbase, dynamics/intpref/baseline off, BRDC/SAAS, finite q>=0 and v0>0");return -1;
++ }return 0;
++}
++int relcv_predict(double*x,double*P,int n,double dt,const double*da,double q){
++ double old[36],dt2=dt*dt,dt3=dt2*dt;int i,j;
++ if(n<6||!isfinite(dt)||dt<0.||!isfinite(q)||q<0.)return -1;
++ for(i=0;i<3;i++)if(!isfinite(da[i]))return -1;
++ for(i=0;i<n;i++)if(!isfinite(x[i]))return -1;
++ for(i=0;i<n*n;i++)if(!isfinite(P[i]))return -1;
++ for(j=0;j<6;j++)for(i=0;i<6;i++)old[i+j*6]=P[i+j*n];
++ /* Sparse evaluation of FPF': all cross-covariances are retained. */
++ for(j=6;j<n;j++)for(i=0;i<3;i++){
++  P[i+j*n]+=dt*P[i+3+j*n];
++  P[j+i*n]+=dt*P[j+(i+3)*n];
++ }
++ for(j=0;j<3;j++)for(i=0;i<3;i++){
++  P[i+j*n]=old[i+j*6]+dt*(old[i+(j+3)*6]+old[i+3+j*6])+dt2*old[i+3+(j+3)*6]+(i==j?q*dt3/3.:0.);
++  P[i+(j+3)*n]=old[i+(j+3)*6]+dt*old[i+3+(j+3)*6]+(i==j?q*dt2/2.:0.);
++  P[i+3+j*n]=old[i+3+j*6]+dt*old[i+3+(j+3)*6]+(i==j?q*dt2/2.:0.);
++  P[i+3+(j+3)*n]=old[i+3+(j+3)*6]+(i==j?q*dt:0.);
++ }
++ for(i=0;i<3;i++)x[i]+=da[i]+dt*x[i+3];
++ for(i=0;i<n;i++)if(!isfinite(x[i]))return -1;
++ for(i=0;i<n*n;i++)if(!isfinite(P[i]))return -1;
++ return 0;
++}
++int relcv_accept_input(rtk_t*r,gtime_t t){
++ double dt;r->rel_action=0;r->rel_dt=0.;
++ if(r->rel_error)return -1;
++ if(r->rel_have_input){
++  dt=timediff(t,r->rel_input_time);
++  if(dt==0.){r->rel_action=4;return 0;}
++  if(!isfinite(dt)||dt<0.){r->rel_error=-2;return -1;}
++ }
++ r->rel_input_time=t;r->rel_have_input=1;return 1;
++}
++static void rel_setstate(rtk_t*r,int i,double mean,double var){int j;for(j=0;j<r->nx;j++)r->P[i+j*r->nx]=r->P[j+i*r->nx]=0.;r->P[i+i*r->nx]=var;r->x[i]=mean;}
++static void anchor(rtk_t*r){int i;r->rel_time=r->sol.time;for(i=0;i<3;i++)r->rel_anchor[i]=r->rb[i];r->rel_initialized=1;}
++int relcv_state(rtk_t*r){
++ double dt=0.,da[3],var=0.;int i,reset=0;
++ if(r->rel_error)return -1;
++ for(i=0;i<3;i++)if(!isfinite(r->rb[i])||!isfinite(r->sol.rr[i])){r->rel_error=-3;return -1;}
++ if(!isfinite(r->sol.time.sec)||r->sol.time.time==0||r->nx<6){r->rel_error=-3;return -1;}
++ for(i=0;i<r->nx*r->nx;i++)if(!isfinite(r->P[i])){r->rel_error=-4;return -1;}
++ if(r->rel_initialized&&!research_prior_valid(r->x,r->P,r->nx,6)){r->rel_error=-4;return -1;}
++ if(r->rel_initialized){
++  dt=timediff(r->sol.time,r->rel_time);r->rel_dt=dt;
++  if(!isfinite(dt)||dt<=0.){r->rel_error=-5;return -1;}
++  for(i=0;i<3;i++){if(r->P[i+i*r->nx]<0.){r->rel_error=-4;return -1;}var+=r->P[i+i*r->nx]/3.;}
++  reset=var>900.;
++ }
++ if(!r->rel_initialized||reset){
++  for(i=0;i<3;i++)rel_setstate(r,i,r->sol.rr[i],900.);
++  for(i=3;i<6;i++)rel_setstate(r,i,0.,r->opt.relv0*r->opt.relv0);
++  r->rel_action=reset?3:1;anchor(r);return 0;
++ }
++ for(i=0;i<3;i++)da[i]=r->rb[i]-r->rel_anchor[i];
++ if(relcv_predict(r->x,r->P,r->nx,dt,da,r->opt.relq)){r->rel_error=-6;return -1;}
++ r->rel_action=2;anchor(r);return 0;
++}
++
++int relcv_valid(const double*x,const double*P,int n){int i;for(i=0;i<n;i++)if(!isfinite(x[i])||!isfinite(P[i+i*n])||P[i+i*n]<-1e-10*(1.+fabs(P[i+i*n])))return 0;for(i=0;i<n*n;i++)if(!isfinite(P[i]))return 0;return 1;}
+--- /dev/null
++++ b/src/relmotion.h
+@@ -0,0 +1,11 @@
++#ifndef RELMOTION_H
++#define RELMOTION_H
++#include "rtklib.h"
++int relcv_options(const prcopt_t*,char*,size_t);
++int relcv_predict(double*,double*,int,double,const double*,double);
++int relcv_accept_input(rtk_t*,gtime_t);
++int relcv_state(rtk_t*);
++int research_prior_valid(const double*,const double*,int,int);
++int relcv_valid(const double*,const double*,int);
++int filter_active_prefix(double*,double*,const double*,const double*,const double*,int,int,int);
++#endif
+--- /dev/null
++++ b/src/research_audit.c
+@@ -0,0 +1,41 @@
++/* Read-only research instrumentation; native matrices are column-major.
++ * JSON matrices explicitly exported as row arrays; H is nx x nv. */
++#include "research_audit.h"
++#include <time.h>
++static FILE *openlog(void){const char *p=getenv("RTK_RESEARCH_AUDIT");return p?fopen(p,"a"):NULL;}
++static double day(gtime_t t){return fmod(time2gpst(t,NULL),86400.0);}
++static void tm(FILE*f,const char*k,gtime_t t){fprintf(f,"\"%s\":[%lld,%.17g]",k,(long long)t.time,t.sec);}
++static void jmat(FILE*f,const char*k,const double*x,int n,int m){int i,j;fprintf(f,"\"%s\":[",k);for(i=0;i<n;i++){fprintf(f,"%s[",i?",":"");for(j=0;j<m;j++)fprintf(f,"%s%.17g",j?",":"",x[i+j*n]);fprintf(f,"]");}fprintf(f,"]");}
++double research_clock(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec+ts.tv_nsec*1e-9;}
++void research_spp(int role,gtime_t obs,const sol_t*s,int ok){FILE*f=openlog();if(!f)return;fprintf(f,"{\"event\":\"SPP\",\"role\":%d,\"tick\":%.0f,\"ok\":%d,",role,day(obs)*1e7,ok);tm(f,"time",s->time);fprintf(f,",");jmat(f,"rr",s->rr,6,1);fprintf(f,"}\n");fclose(f);}
++void research_epoch(const rtk_t*r,gtime_t obs,int rc,double elapsed){FILE*f=openlog();if(!f)return;fprintf(f,"{\"event\":\"EPOCH\",\"tick\":%.0f,\"rc\":%d,\"stat\":%d,\"elapsed_s\":%.17g,\"legacy_dt\":%.17g,\"age\":%.17g,",day(obs)*1e7,rc,r->sol.stat,elapsed,r->tt,r->sol.age);tm(f,"time",r->sol.time);fprintf(f,",");jmat(f,"rr",r->sol.rr,6,1);fprintf(f,",");jmat(f,"rb",r->rb,6,1);
++#ifdef RTK_REL_RESEARCH
++ fprintf(f,",\"rel_error\":%d,\"rel_initialized\":%d,\"rel_action\":%d,\"state_dt\":%.17g,",r->rel_error,r->rel_initialized,r->rel_action,r->rel_dt);tm(f,"state_time",r->rel_time);fprintf(f,",");jmat(f,"state_anchor",r->rel_anchor,3,1);
++ if(r->opt.relmotion){double pp[36];int i,j;for(j=0;j<6;j++)for(i=0;i<6;i++)pp[i+j*6]=r->P[i+j*r->nx];fprintf(f,",");jmat(f,"state_x6",r->x,6,1);fprintf(f,",");jmat(f,"state_P6",pp,6,6);}
++
++#else
++ fprintf(f,",\"rel_error\":0,\"rel_initialized\":0,\"rel_action\":0,\"state_dt\":0,\"state_time\":[0,0],\"state_anchor\":[[0],[0],[0]]");
++#endif
++ fprintf(f,"}\n");fclose(f);}
++void research_ils(const rtk_t*r,const int*ix,int nb,const double*y,const double*Qb,const double*b,const double*s,const double*Qab){FILE*f=openlog();int i;if(!f)return;fprintf(f,"{\"event\":\"ILS\",\"time_day\":%.17g,\"nfix\":%d,\"costs\":[%.17g,%.17g],\"pairs\":[",day(r->sol.time),r->nfix,s[0],s[1]);for(i=0;i<nb;i++)fprintf(f,"%s[%d,%d]",i?",":"",ix[i*2],ix[i*2+1]);fprintf(f,"],");jmat(f,"a",y,nb,1);fprintf(f,",");jmat(f,"Qb",Qb,nb,nb);fprintf(f,",");jmat(f,"candidates",b,nb,2);
++#ifdef RTK_REL_RESEARCH
++ if(r->opt.relmotion){double*pp=mat(r->na,r->na);int i,j;for(j=0;j<r->na;j++)for(i=0;i<r->na;i++)pp[i+j*r->na]=r->P[i+j*r->nx];fprintf(f,",");jmat(f,"real_x",r->x,r->na,1);fprintf(f,",");jmat(f,"real_P",pp,r->na,r->na);fprintf(f,",");jmat(f,"Qab",Qab,r->na,nb);free(pp);}
++#endif
++ fprintf(f,"}\n");fclose(f);}
++void research_hold(const rtk_t*r,const double*xa,const double*H,const double*v,int nv){FILE*f=openlog();int i,j,a,b;if(!f)return;fprintf(f,"{\"event\":\"HOLD\",\"time_day\":%.17g,\"nfix\":%d,\"edges\":[",day(r->sol.time),r->nfix);for(j=0;j<nv;j++){a=b=-1;for(i=0;i<r->nx;i++){if(H[i+j*r->nx]==1.)a=i;if(H[i+j*r->nx]==-1.)b=i;}fprintf(f,"%s{\"ref\":%d,\"sat\":%d,\"freq\":%d,\"N\":%.17g,\"v\":%.17g}",j?",":"",(a-r->na)%MAXSAT+1,(b-r->na)%MAXSAT+1,(a-r->na)/MAXSAT,xa[a]-xa[b],v[j]);}fprintf(f,"]");
++#ifdef RTK_REL_RESEARCH
++ if(r->opt.relmotion){int k,n=0,*ids=imat(r->nx,1);double*xx,*pp;for(k=0;k<r->na;k++)ids[n++]=k;for(k=r->na;k<r->nx;k++)if(r->x[k]!=0.&&r->P[k+k*r->nx]>0.)ids[n++]=k;xx=mat(n,1);pp=mat(n,n);fprintf(f,",\"indices\":[");for(k=0;k<n;k++){fprintf(f,"%s%d",k?",":"",ids[k]);xx[k]=r->x[ids[k]];for(j=0;j<n;j++)pp[k+j*n]=r->P[ids[k]+ids[j]*r->nx];}fprintf(f,"],");jmat(f,"prior_x",xx,n,1);fprintf(f,",");jmat(f,"prior_P",pp,n,n);free(ids);free(xx);free(pp);}
++#endif
++ fprintf(f,"}\n");fclose(f);}
++void research_final(const rtk_t*r,int stat,const double*xa,gtime_t obs){FILE*f=openlog();int nf=r->opt.ionoopt==IONOOPT_IFLC?1:r->opt.nf,i,j,k,n=r->na,*ids,s,fr,ref,root,first=1;double*x,*P; if(!f)return;ids=imat(r->nx,1);for(i=0;i<n;i++)ids[i]=i;
++ fprintf(f,"{\"event\":\"REL\",\"tick\":%.0f,\"stat\":%d,\"ratio\":%.17g,\"nfix\":%d,\"na\":%d,\"nx\":%d,\"nodes\":[",day(obs)*1e7,stat,(double)r->sol.ratio,r->nfix,r->na,r->nx);
++ for(fr=0;fr<nf;fr++)for(s=1;s<=MAXSAT;s++){i=r->na+MAXSAT*fr+s-1;if(i>=r->nx||r->x[i]==0.)continue;ids[n++]=i;fprintf(f,"%s{\"index\":%d,\"freq\":%d,\"sat\":%d,\"lock\":%d,\"outc\":%u,\"slip\":%u,\"half\":%u,\"fix\":%u}",first?"":",",i,fr,s,r->ssat[s-1].lock[fr],r->ssat[s-1].outc[fr],r->ssat[s-1].slip[fr],r->ssat[s-1].half[fr],r->ssat[s-1].fix[fr]);first=0;}
++ fprintf(f,"],\"accepted_edges\":[");first=1;if(stat==SOLQ_FIX)for(fr=0;fr<nf;fr++){ref=root=0;for(s=1;s<=MAXSAT;s++){if(r->ssat[s-1].sys!=SYS_GPS||(r->ssat[s-1].fix[fr]!=2&&r->ssat[s-1].fix[fr]!=3))continue;i=r->na+MAXSAT*fr+s-1;if(!ref){ref=s;root=i;continue;}fprintf(f,"%s{\"freq\":%d,\"ref\":%d,\"sat\":%d,\"N\":%.17g}",first?"":",",fr,ref,s,xa[root]-xa[i]);first=0;}}
++ fprintf(f,"],");x=mat(n,1);P=mat(n,n);for(i=0;i<n;i++){x[i]=r->x[ids[i]];for(j=0;j<n;j++)P[i+j*n]=r->P[ids[i]+ids[j]*r->nx];}jmat(f,"x",x,n,1);fprintf(f,",");jmat(f,"P",P,n,n);fprintf(f,",");jmat(f,"fixed_x",r->xa,r->na,1);fprintf(f,",");jmat(f,"fixed_P",r->Pa,r->na,r->na);fprintf(f,",");jmat(f,"rb",r->rb,6,1);fprintf(f,",");jmat(f,"rr",r->sol.rr,6,1);fprintf(f,"}\n");free(x);free(P);free(ids);fclose(f);}
++
++void research_motion(const rtk_t*r,int phase){FILE*f=openlog();int i,pm=r->opt.dynamics?9:3,isrel=0;if(!f)return;
++#ifdef RTK_REL_RESEARCH
++ isrel=r->opt.relmotion; if(isrel)pm=6;
++#endif
++ fprintf(f,"{\"event\":\"MOTION\",\"phase\":%d,\"time_day\":%.17g,\"legacy_dt\":%.17g,\"physical_active\":[",phase,day(r->sol.time),r->tt);
++ for(i=0;i<pm;i++)fprintf(f,"%s%d",i?",":"",r->P[i+i*r->nx]>0.&&(isrel||r->x[i]!=0.));fprintf(f,"],");jmat(f,"physical_x",r->x,pm,1);fprintf(f,"}\n");fclose(f);}
+--- /dev/null
++++ b/src/research_audit.h
+@@ -0,0 +1,11 @@
++#ifndef RESEARCH_AUDIT_H
++#define RESEARCH_AUDIT_H
++#include "rtklib.h"
++double research_clock(void);
++void research_spp(int role,gtime_t obs,const sol_t *sol,int ok);
++void research_epoch(const rtk_t *rtk,gtime_t obs,int rc,double elapsed);
++void research_ils(const rtk_t *rtk,const int *ix,int nb,const double *y,const double *Qb,const double *b,const double *cost,const double *Qab);
++void research_hold(const rtk_t *rtk,const double *xa,const double *H,const double *v,int nv);
++void research_final(const rtk_t *rtk,int stat,const double *xa,gtime_t obs);
++void research_motion(const rtk_t *rtk,int phase);
++#endif
+--- a/src/rtkcmn.c
++++ b/src/rtkcmn.c
+@@ -219,7 +219,8 @@
+     30.0,30.0,30.0,             /* maxtdif,maxinno,maxgdop */
+     {0},{0},{0},                /* baseline,ru,rb */
+     {"",""},                    /* anttype */
+-    {{0}},{{0}},{0}             /* antdel,pcv,exsats */
++    {{0}},{{0}},{0},            /* antdel,pcv,exsats */
++    .relmotion=0, .relq=0.2, .relv0=10.0
+ };
+ const solopt_t solopt_default={ /* defaults solution output options */
+     SOLF_LLH,TIMES_GPST,1,3,    /* posf,times,timef,timeu */
+@@ -1323,6 +1324,60 @@
+     free(ix); free(x_); free(xp_); free(P_); free(Pp_); free(H_);
+     return info;
+ }
++
++/* Same native filter_ kernel, with a physical-state activity prefix.
++ * Nuisance states preserve legacy zero-sentinel behavior. */
++
++/* Standard numerical maintenance, separate from the motion model.
++ * No eigenvalue clipping or P/Q/R inflation. Legal symmetric SPD prior/R. */
++static int chol_valid(const double*A,int n){
++ double *L=zeros(n,n),v;int i,j,k,ok=1;
++ for(j=0;j<n&&ok;j++){v=A[j+j*n];for(k=0;k<j;k++)v-=L[j+k*n]*L[j+k*n];if(!isfinite(v)||v<=0.){ok=0;break;}L[j+j*n]=sqrt(v);for(i=j+1;i<n;i++){v=A[i+j*n];for(k=0;k<j;k++)v-=L[i+k*n]*L[j+k*n];L[i+j*n]=v/L[j+j*n];}}
++ free(L);return ok;
++}
++
++/* Pure validation, before any motion noise or variance-protection reset. */
++extern int research_prior_valid(const double*x,const double*P,int n,int physical){
++ int i,j,k=0,*ix,ok=1;double *PP,a,b;
++ if(physical<1||physical>n)return 0;
++ for(i=0;i<n;i++)if(!isfinite(x[i])||!isfinite(P[i+i*n])||(i<physical&&P[i+i*n]<=0.)||(x[i]!=0.&&P[i+i*n]<=0.))return 0;
++ ix=imat(n,1);for(i=0;i<n;i++)if(P[i+i*n]>0.&&(i<physical||x[i]!=0.))ix[k++]=i;
++ PP=mat(k,k);for(j=0;j<k&&ok;j++)for(i=0;i<k;i++){a=P[ix[i]+ix[j]*n];b=P[ix[j]+ix[i]*n];if(!isfinite(a)||!isfinite(b)||fabs(a-b)>1e-8*sqrt(P[ix[i]+ix[i]*n])*sqrt(P[ix[j]+ix[j]*n])){ok=0;break;}PP[i+j*k]=(a+b)*.5;}
++ if(ok)ok=chol_valid(PP,k);free(PP);free(ix);return ok;
++}
++
++static int filter_joseph_(const double*x,const double*P,const double*H,const double*v,const double*R,int n,int m,double*xp,double*Pp){
++ double *Ps=mat(n,n),*F=mat(n,m),*S=mat(m,m),*K=mat(n,m),*M=eye(n),*MP=mat(n,n),*KR=mat(n,m),a,b,z;int i,j,info;
++ for(j=0;j<n;j++)for(i=0;i<n;i++){a=P[i+j*n];b=P[j+i*n];if(!isfinite(a)||!isfinite(b)||P[i+i*n]<=0.||P[j+j*n]<=0.||fabs(a-b)>1e-8*sqrt(P[i+i*n])*sqrt(P[j+j*n])){info=-97;goto done;}Ps[i+j*n]=(a+b)*.5;}
++ if(!chol_valid(Ps,n)){info=-99;goto done;}
++ for(i=0;i<m;i++)if(!isfinite(v[i])){info=-96;goto done;}
++ for(j=0;j<m;j++)for(i=0;i<m;i++)if(!isfinite(R[i+j*m])||fabs(R[i+j*m]-R[j+i*m])>1e-12*(1.+fabs(R[i+j*m]))){info=-96;goto done;}
++ if(!chol_valid(R,m)){info=-96;goto done;}
++ matcpy(S,R,m,m);matcpy(xp,x,n,1);matmul("NN",n,m,n,1.,Ps,H,0.,F);matmul("TN",m,m,n,1.,H,F,1.,S);
++ if((info=matinv(S,m)))goto done;
++ matmul("NN",n,m,m,1.,F,S,0.,K);matmul("NN",n,1,m,1.,K,v,1.,xp);matmul("NT",n,n,m,-1.,K,H,1.,M);
++ matmul("NN",n,n,n,1.,M,Ps,0.,MP);matmul("NT",n,n,n,1.,MP,M,0.,Pp);matmul("NN",n,m,m,1.,K,R,0.,KR);matmul("NT",n,n,m,1.,KR,K,1.,Pp);
++ for(j=0;j<n;j++)for(i=0;i<j;i++){z=(Pp[i+j*n]+Pp[j+i*n])*.5;Pp[i+j*n]=Pp[j+i*n]=z;}
++ for(i=0;i<n;i++)if(!isfinite(xp[i])){info=-100;goto done;}
++ if(!chol_valid(Pp,n)){info=-100;goto done;}
++ done:free(Ps);free(F);free(S);free(K);free(M);free(MP);free(KR);return info;
++}
++
++extern int filter_active_prefix(double*x,double*P,const double*H,const double*v,
++ const double*R,int n,int m,int physical){
++ double *xx,*xp,*PP,*Pp,*HH;int i,j,k,info,*ix;
++ if(physical<1||physical>n||m<1)return -98;
++ for(i=0;i<physical;i++)if(!isfinite(x[i])||!isfinite(P[i+i*n])||P[i+i*n]<=0.)return -98;
++ for(i=0;i<n;i++)if(!isfinite(x[i]))return -98;
++ ix=imat(n,1);for(i=k=0;i<n;i++)if(P[i+i*n]>0.&&(i<physical||x[i]!=0.))ix[k++]=i;
++ if(k<physical){free(ix);return -98;}
++ xx=mat(k,1);xp=mat(k,1);PP=mat(k,k);Pp=mat(k,k);HH=mat(k,m);
++ for(i=0;i<k;i++){xx[i]=x[ix[i]];for(j=0;j<k;j++)PP[i+j*k]=P[ix[i]+ix[j]*n];for(j=0;j<m;j++)HH[i+j*k]=H[ix[i]+j*n];}
++ info=filter_joseph_(xx,PP,HH,v,R,k,m,xp,Pp);
++ if(!info){for(i=0;i<k;i++){x[ix[i]]=xp[i];for(j=0;j<k;j++)P[ix[i]+ix[j]*n]=Pp[i+j*k];}}
++ free(ix);free(xx);free(xp);free(PP);free(Pp);free(HH);return info;
++}
++
+ /* smoother --------------------------------------------------------------------
+ * combine forward and backward filters by fixed-interval smoother as follows:
+ *
+--- a/src/rtklib.h
++++ b/src/rtklib.h
+@@ -59,6 +59,7 @@
+ 
+ #define VER_RTKLIB  "2.4.3"             /* library version */
+ 
++#define RTK_REL_RESEARCH 1
+ #define PATCH_LEVEL "b34"               /* patch level */
+ 
+ #define COPYRIGHT_RTKLIB \
+@@ -1014,6 +1015,8 @@
+     double odisp[2][6*11]; /* ocean tide loading parameters {rov,base} */
+     int  freqopt;       /* disable L2-AR */
+     char pppopt[256];   /* ppp option */
++    int relmotion;       /* research relative motion: 0 native, 1 CV */
++    double relq,relv0;   /* white acceleration PSD m2/s3; initial velocity sd m/s */
+ } prcopt_t;
+ 
+ typedef struct {        /* solution options type */
+@@ -1138,6 +1141,10 @@
+     int neb;            /* bytes in error message buffer */
+     char errbuf[MAXERRMSG]; /* error message buffer */
+     prcopt_t opt;       /* processing options */
++    int rel_initialized,rel_error,rel_action,rel_have_input;
++    gtime_t rel_input_time;
++    gtime_t rel_time;
++    double rel_anchor[3],rel_dt;
+ } rtk_t;
+ 
+ typedef struct {        /* receiver raw data control type */
+--- a/src/rtkpos.c
++++ b/src/rtkpos.c
+@@ -49,6 +49,8 @@
+ *-----------------------------------------------------------------------------*/
+ #include <stdarg.h>
+ #include "rtklib.h"
++#include "research_audit.h"
++#include "relmotion.h"
+ 
+ /* constants/macros ----------------------------------------------------------*/
+ 
+@@ -75,7 +77,7 @@
+ 
+ /* number of parameters (pos,ionos,tropos,hw-bias,phase-bias,real,estimated) */
+ #define NF(opt)     ((opt)->ionoopt==IONOOPT_IFLC?1:(opt)->nf)
+-#define NP(opt)     ((opt)->dynamics==0?3:9)
++#define NP(opt)     ((opt)->relmotion?6:((opt)->dynamics==0?3:9))
+ #define NI(opt)     ((opt)->ionoopt!=IONOOPT_EST?0:MAXSAT)
+ #define NT(opt)     ((opt)->tropopt<TROPOPT_EST?0:((opt)->tropopt<TROPOPT_ESTG?2:6))
+ #define NL(opt)     ((opt)->glomodear!=2?0:NFREQGLO)
+@@ -439,6 +441,7 @@
+     int i,j,*ix,nx;
+     
+     trace(3,"udpos   : tt=%.3f\n",tt);
++    if(rtk->opt.relmotion){relcv_state(rtk);return;}
+     
+     /* fixed mode */
+     if (rtk->opt.mode==PMODE_FIXED) {
+@@ -812,7 +815,10 @@
+     trace(3,"udstate : ns=%d\n",ns);
+     
+     /* temporal update of position/velocity/acceleration */
++    research_motion(rtk,0);
+     udpos(rtk,tt);
++    research_motion(rtk,1);
++    if(rtk->opt.relmotion&&rtk->rel_error)return;
+     
+     /* temporal update of ionospheric parameters */
+     if (rtk->opt.ionoopt>=IONOOPT_EST) {
+@@ -1335,10 +1341,13 @@
+         R=zeros(nv,nv);
+         for (i=0;i<nv;i++) R[i+i*nv]=VAR_HOLDAMB;
+         
++        research_hold(rtk,xa,H,v,nv);
+         /* update states with constraints */
+-        if ((info=filter(rtk->x,rtk->P,H,v,R,rtk->nx,nv))) {
++        if ((info=rtk->opt.relmotion?filter_active_prefix(rtk->x,rtk->P,H,v,R,rtk->nx,nv,6):filter(rtk->x,rtk->P,H,v,R,rtk->nx,nv))) {
+             errmsg(rtk,"filter error (info=%d)\n",info);
+-        }
++            if(rtk->opt.relmotion)rtk->rel_error=-8;
++        }
++        if(rtk->opt.relmotion&&!relcv_valid(rtk->x,rtk->P,rtk->nx))rtk->rel_error=-9;
+         free(R);
+     }
+     free(v); free(H);
+@@ -1384,6 +1393,7 @@
+     }
+     /* LAMBDA/MLAMBDA ILS (integer least-square) estimation */
+     if (!(info=lambda(nb,2,y,Qb,b,s))) {
++        research_ils(rtk,ix,nb,y,Qb,b,s,Qab);
+         trace(4,"N(1)="); tracemat(4,b   ,1,nb,10,3);
+         trace(4,"N(2)="); tracemat(4,b+nb,1,nb,10,3);
+         
+@@ -1506,6 +1516,7 @@
+     }
+     /* temporal update of states */
+     udstate(rtk,obs,sat,iu,ir,ns,nav);
++    if(opt->relmotion&&rtk->rel_error){free(rs);free(dts);free(var);free(y);free(e);free(azel);free(freq);return 0;}
+     
+     trace(4,"x(0)="); tracemat(4,rtk->x,1,NR(opt),13,4);
+     
+@@ -1534,11 +1545,13 @@
+         }
+         /* Kalman filter measurement update */
+         matcpy(Pp,rtk->P,rtk->nx,rtk->nx);
+-        if ((info=filter(xp,Pp,H,v,R,rtk->nx,nv))) {
++        if ((info=opt->relmotion?filter_active_prefix(xp,Pp,H,v,R,rtk->nx,nv,6):filter(xp,Pp,H,v,R,rtk->nx,nv))) {
+             errmsg(rtk,"filter error (info=%d)\n",info);
++            if(opt->relmotion)rtk->rel_error=-8;
+             stat=SOLQ_NONE;
+             break;
+         }
++        if(opt->relmotion&&!relcv_valid(xp,Pp,rtk->nx)){rtk->rel_error=-9;stat=SOLQ_NONE;break;}
+         trace(4,"x(%d)=",i+1); tracemat(4,xp,1,NR(opt),13,4);
+     }
+     if (stat!=SOLQ_NONE&&zdres(0,obs,nu,rs,dts,var,svh,nav,xp,opt,0,y,e,azel,
+@@ -1642,6 +1655,7 @@
+         if (rtk->ssat[i].fix[j]==2&&stat!=SOLQ_FIX) rtk->ssat[i].fix[j]=1;
+         if (rtk->ssat[i].slip[j]&1) rtk->ssat[i].slipc[j]++;
+     }
++    research_final(rtk,stat,xa,obs[0].time);
+     free(rs); free(dts); free(var); free(y); free(e); free(azel); free(freq);
+     free(xp); free(Pp);  free(xa);  free(v); free(H); free(R); free(bias);
+     
+@@ -1680,6 +1694,10 @@
+     }
+     for (i=0;i<MAXERRMSG;i++) rtk->errbuf[i]=0;
+     rtk->opt=*opt;
++    rtk->rel_initialized=rtk->rel_error=rtk->rel_action=rtk->rel_have_input=0;
++    rtk->rel_time.time=rtk->rel_input_time.time=0;rtk->rel_time.sec=rtk->rel_input_time.sec=0.;rtk->rel_dt=0.;
++    for(i=0;i<3;i++) rtk->rel_anchor[i]=0.;
++    if(opt->relmotion){char why[256];if(relcv_options(opt,why,sizeof(why)))rtk->rel_error=-10;}
+ }
+ /* free rtk control ------------------------------------------------------------
+ * free memory for rtk control struct
+@@ -1694,6 +1712,9 @@
+     free(rtk->x ); rtk->x =NULL;
+     free(rtk->P ); rtk->P =NULL;
+     free(rtk->xa); rtk->xa=NULL;
++    rtk->rel_initialized=rtk->rel_error=rtk->rel_action=rtk->rel_have_input=0;
++    rtk->rel_time.time=rtk->rel_input_time.time=0;rtk->rel_time.sec=rtk->rel_input_time.sec=0.;rtk->rel_dt=0.;
++    memset(rtk->rel_anchor,0,sizeof(rtk->rel_anchor));
+     free(rtk->Pa); rtk->Pa=NULL;
+ }
+ /* precise positioning ---------------------------------------------------------
+@@ -1763,6 +1784,7 @@
+     char msg[128]="";
+     
+     trace(3,"rtkpos  : time=%s n=%d\n",time_str(obs[0].time,3),n);
++    if(opt->relmotion&&relcv_accept_input(rtk,obs[0].time)<=0){rtk->sol.stat=SOLQ_NONE;return 0;}
+     trace(4,"obs=\n"); traceobs(4,obs,n);
+     
+     /* set base staion position */
+@@ -1777,13 +1799,16 @@
+     time=rtk->sol.time; /* previous epoch */
+     
+     /* rover position by single point positioning */
+-    if (!pntpos(obs,nu,nav,&rtk->opt,&rtk->sol,NULL,rtk->ssat,msg)) {
++    { int spp_ok=pntpos(obs,nu,nav,&rtk->opt,&rtk->sol,NULL,rtk->ssat,msg);
++      research_spp(1,obs[0].time,&rtk->sol,spp_ok);
++      if (!spp_ok) {
+         errmsg(rtk,"point pos error (%s)\n",msg);
+         
+         if (!rtk->opt.dynamics) {
+             outsolstat(rtk);
+             return 0;
+         }
++    }
+     }
+     if (time.time!=0) rtk->tt=timediff(rtk->sol.time,time);
+     
+@@ -1811,9 +1836,12 @@
+     if (opt->mode==PMODE_MOVEB) { /*  moving baseline */
+         
+         /* estimate position/velocity of base station */
+-        if (!pntpos(obs+nu,nr,nav,&rtk->opt,&solb,NULL,NULL,msg)) {
++        { int spp_ok=pntpos(obs+nu,nr,nav,&rtk->opt,&solb,NULL,NULL,msg);
++          research_spp(2,obs[nu].time,&solb,spp_ok);
++          if (!spp_ok) {
+             errmsg(rtk,"base station position error (%s)\n",msg);
+             return 0;
++        }
+         }
+         rtk->sol.age=(float)timediff(rtk->sol.time,solb.time);
+         

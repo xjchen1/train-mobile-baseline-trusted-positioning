@@ -1,0 +1,22 @@
+{
+  "R0_CONT": {
+    "label": "相对运动预测关闭＋continuous",
+    "variant": "original",
+    "config": "configs/R0_CONT.conf"
+  },
+  "R0_FH": {
+    "label": "相对运动预测关闭＋fix-and-hold",
+    "variant": "original",
+    "config": "configs/R0_FH.conf"
+  },
+  "RR_CONT": {
+    "label": "相对CV运动预测＋continuous",
+    "variant": "relative_cv",
+    "config": "configs/RR_CONT.conf"
+  },
+  "RR_FH": {
+    "label": "相对CV运动预测＋fix-and-hold",
+    "variant": "relative_cv",
+    "config": "configs/RR_FH.conf"
+  }
+}

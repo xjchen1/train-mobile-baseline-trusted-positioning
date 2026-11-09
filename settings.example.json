@@ -1,0 +1,18 @@
+{
+  "profile": "R0_CONT",
+  "dataset": "local_example",
+  "start_gpst": "2026-01-01 00:00:00",
+  "end_gpst": "2026-01-01 00:10:00",
+  "interval_s": 1,
+  "export_baseline": true,
+  "output_directory": "outputs",
+  "timeout_s": 300,
+  "datasets": {
+    "local_example": {
+      "description": "示例数据集；请替换为本机 RINEX 文件路径",
+      "master_observation": "data/master.26O",
+      "rover_observation": "data/rover.26O",
+      "navigation": "data/navigation.26N"
+    }
+  }
+}

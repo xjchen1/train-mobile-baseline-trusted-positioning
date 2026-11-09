@@ -1,0 +1,128 @@
+{
+  "original": {
+    "source_root": "c_src/original",
+    "compile_sources": [
+      "src/rtkcmn.c",
+      "src/rinex.c",
+      "src/rtkpos.c",
+      "src/postpos.c",
+      "src/solution.c",
+      "src/lambda.c",
+      "src/geoid.c",
+      "src/sbas.c",
+      "src/preceph.c",
+      "src/pntpos.c",
+      "src/ephemeris.c",
+      "src/options.c",
+      "src/ppp.c",
+      "src/ppp_ar.c",
+      "src/rtcm.c",
+      "src/rtcm2.c",
+      "src/rtcm3.c",
+      "src/rtcm3e.c",
+      "src/ionex.c",
+      "src/tides.c"
+    ],
+    "entry": "app/consapp/rnx2rtkp/rnx2rtkp.c",
+    "flags": [
+      "-O2",
+      "-DTRACE",
+      "-DENAGLO",
+      "-DENAQZS",
+      "-DENAGAL",
+      "-DENACMP",
+      "-DENAIRN",
+      "-DNFREQ=3",
+      "-DNEXOBS=3"
+    ],
+    "link_flags": [
+      "-lm",
+      "-lpthread"
+    ]
+  },
+  "original_audit": {
+    "source_root": "c_src/original_audit",
+    "compile_sources": [
+      "src/rtkcmn.c",
+      "src/rinex.c",
+      "src/rtkpos.c",
+      "src/postpos.c",
+      "src/solution.c",
+      "src/lambda.c",
+      "src/geoid.c",
+      "src/sbas.c",
+      "src/preceph.c",
+      "src/pntpos.c",
+      "src/ephemeris.c",
+      "src/options.c",
+      "src/ppp.c",
+      "src/ppp_ar.c",
+      "src/rtcm.c",
+      "src/rtcm2.c",
+      "src/rtcm3.c",
+      "src/rtcm3e.c",
+      "src/ionex.c",
+      "src/tides.c",
+      "src/research_audit.c"
+    ],
+    "entry": "app/consapp/rnx2rtkp/rnx2rtkp.c",
+    "flags": [
+      "-O2",
+      "-DTRACE",
+      "-DENAGLO",
+      "-DENAQZS",
+      "-DENAGAL",
+      "-DENACMP",
+      "-DENAIRN",
+      "-DNFREQ=3",
+      "-DNEXOBS=3"
+    ],
+    "link_flags": [
+      "-lm",
+      "-lpthread"
+    ]
+  },
+  "relative_cv": {
+    "source_root": "c_src/relative_cv",
+    "compile_sources": [
+      "src/rtkcmn.c",
+      "src/rinex.c",
+      "src/rtkpos.c",
+      "src/postpos.c",
+      "src/solution.c",
+      "src/lambda.c",
+      "src/geoid.c",
+      "src/sbas.c",
+      "src/preceph.c",
+      "src/pntpos.c",
+      "src/ephemeris.c",
+      "src/options.c",
+      "src/ppp.c",
+      "src/ppp_ar.c",
+      "src/rtcm.c",
+      "src/rtcm2.c",
+      "src/rtcm3.c",
+      "src/rtcm3e.c",
+      "src/ionex.c",
+      "src/tides.c",
+      "src/research_audit.c",
+      "src/relmotion.c"
+    ],
+    "entry": "app/consapp/rnx2rtkp/rnx2rtkp.c",
+    "flags": [
+      "-O2",
+      "-DTRACE",
+      "-DENAGLO",
+      "-DENAQZS",
+      "-DENAGAL",
+      "-DENACMP",
+      "-DENAIRN",
+      "-DNFREQ=3",
+      "-DNEXOBS=3"
+    ],
+    "link_flags": [
+      "-lm",
+      "-lpthread"
+    ]
+  }
+}

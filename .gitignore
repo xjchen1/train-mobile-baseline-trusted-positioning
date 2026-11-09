@@ -1,0 +1,28 @@
+# Local inputs, outputs, and compiled artifacts
+settings.json
+data/
+outputs/
+build/
+bin/
+
+# Local editor and OS files
+.idea/
+.run/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# GNSS observations, navigation, and generated solutions
+*.rnx
+*.obs
+*.nav
+*.sp3
+*.clk
+*.pos
+*.trace
+*.stat
+*.??O
+*.??N
+*.??P
